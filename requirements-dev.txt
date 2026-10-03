@@ -1,0 +1,6 @@
+# Dépendances côté poste (scripts de test/démo et pytest), à installer dans le venv du projet :
+#   python -m venv .venv && .venv/Scripts/python -m pip install -r requirements-dev.txt   (Windows)
+#   python -m venv .venv && .venv/bin/python -m pip install -r requirements-dev.txt       (Linux/macOS)
+httpx==0.28.1
+pytest==9.1.1
+pika==1.4.4

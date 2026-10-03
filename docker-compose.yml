@@ -15,6 +15,29 @@ x-erpnext-redis-env: &erpnext-redis-env
   FRAPPE_REDIS_CACHE: redis://erpnext-redis-cache:6379
   FRAPPE_REDIS_QUEUE: redis://erpnext-redis-queue:6379
 
+# ---------------------------------------------------------------------------
+# Integration Hub — une seule image (Dockerfile racine), une commande par service.
+# ---------------------------------------------------------------------------
+x-hub-env: &hub-env
+  LOG_LEVEL: INFO
+  INTEGRATION_DB_HOST: integration-db
+  INTEGRATION_DB_NAME: ${INTEGRATION_DB_NAME:-integration}
+  INTEGRATION_DB_USER: ${INTEGRATION_DB_USER:-integration}
+  INTEGRATION_DB_PASSWORD: ${INTEGRATION_DB_PASSWORD}
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_USER: ${RABBITMQ_USER:-opentraining}
+  RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+  HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:-5}
+  SECRETS_DIR: /secrets
+
+# L'image est construite par le service `migrate` uniquement (évite des builds concurrents du même tag).
+x-hub: &hub
+  image: opentraining/integration-hub:latest
+  pull_policy: never
+  networks: [si]
+  volumes:
+    - integration-secrets:/secrets:ro
+
 x-erpnext-after-config: &erpnext-after-config
   erpnext-configurator:
     condition: service_completed_successfully
@@ -279,6 +302,41 @@ services:
       - "${RABBITMQ_MGMT_PORT:-15672}:15672"
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
+
+  migrate:
+    <<: *hub
+    build: .
+    pull_policy: build
+    restart: "no"
+    command: ["python", "-m", "shared.migrate"]
+    environment:
+      <<: *hub-env
+      SERVICE_NAME: migrate
+    depends_on:
+      integration-db:
+        condition: service_healthy
+
+  integration-api:
+    <<: *hub
+    restart: unless-stopped
+    working_dir: /app/integration-api
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    environment:
+      <<: *hub-env
+      SERVICE_NAME: integration-api
+      DB_POOL_MAX: "10"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    ports:
+      - "${API_PORT:-8000}:8000"
 
   mailpit:
     image: axllent/mailpit:latest
