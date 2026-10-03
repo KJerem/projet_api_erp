@@ -121,6 +121,26 @@ def outbox_event(registration_id: str, event_type: str = "registration.accepted"
                f"AND event_type = '{event_type}'")
 
 
+def mailpit_messages(recipient: str) -> list[dict]:
+    """Emails reçus par Mailpit pour ce destinataire : [{"subject", "id", ...}]."""
+    port = ENV.get("MAILPIT_UI_PORT", "8025")
+    resp = httpx.get(f"http://localhost:{port}/api/v1/search", params={"query": f"to:{recipient}"}, timeout=10)
+    resp.raise_for_status()
+    return resp.json().get("messages", [])
+
+
+def mailpit_body(message_id: str) -> dict:
+    port = ENV.get("MAILPIT_UI_PORT", "8025")
+    return httpx.get(f"http://localhost:{port}/api/v1/message/{message_id}", timeout=10).json()
+
+
+def audited_event_types(registration_id: str) -> list[str]:
+    """Types d'événements journalisés par l'audit-worker pour une inscription."""
+    rows = sql("SELECT event_type FROM audit_log WHERE payload->'payload'->>'registrationId' = "
+               f"'{registration_id}' ORDER BY received_at")
+    return rows.splitlines() if rows else []
+
+
 FINAL_STATUSES = {"CONFIRMED", "COMPENSATED", "FAILED"}
 
 

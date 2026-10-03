@@ -170,7 +170,7 @@ class Consumer:
             return
         headers = dict(props.headers or {})
         if outcome.kind == "retry":
-            channel.basic_publish(RETRY_EXCHANGE, retry_queue_name(outcome.delay), body,
+            channel.basic_publish(RETRY_EXCHANGE, retry_queue_name(self.queue, outcome.delay), body,
                                   properties=self._copy_props(props, {**headers, **outcome.headers}), mandatory=True)
         elif outcome.kind == "dlq":
             channel.basic_publish(DLX, self.queue, body,

@@ -9,7 +9,7 @@ import uuid
 
 import httpx
 
-from _testlib import API_URL, Checks, Externals, wait_status
+from _testlib import API_URL, Checks, Externals, audited_event_types, mailpit_messages, wait_for, wait_status
 
 SESSION = "SESSION-PYTHON-01"
 
@@ -60,6 +60,14 @@ def main() -> None:
     t.check("ERPNext : montant du Sales Order = prix catalogue (850)",
             orders and float(orders[0]["grand_total"]) == 850.0, orders and orders[0]["grand_total"])
 
+    # --- Notification et audit ----------------------------------------------------------------------
+    t.check("Mailpit : email de confirmation reçu", wait_for(lambda: any(
+        "confirmée" in m["Subject"] for m in mailpit_messages(email)), timeout=30),
+        [m["Subject"] for m in mailpit_messages(email)])
+    t.check("audit : registration.accepted et registration.confirmed journalisés", wait_for(lambda: set(
+        audited_event_types(reg_id)) >= {"registration.accepted", "registration.confirmed"}, timeout=30),
+        audited_event_types(reg_id))
+
     # --- Test 2 : rejeu de la même Idempotency-Key après traitement ----------------------------------
     replay = api.post("/api/v1/registrations", json=payload, headers={"Idempotency-Key": key})
     t.check("rejeu même clé -> même registrationId", replay.json().get("registrationId") == reg_id, replay.json())
@@ -71,9 +79,11 @@ def main() -> None:
             and len(ext.erp_list("Sales Order", [["po_no", "=", reg_id]])) == 1)
     seats_after = api.get(f"/api/v1/sessions/{SESSION}").json()["remainingSeats"]
     t.check("une seule place consommée", seats_before - seats_after == 1, f"{seats_before} -> {seats_after}")
+    t.check("toujours 1 seul email de confirmation", len(mailpit_messages(email)) == 1, len(mailpit_messages(email)))
 
     print(f"\n      Moodle  : http://localhost:8081/user/profile.php?id={view['moodleUserId']}")
     print(f"      ERPNext : http://localhost:8080/app/sales-order/{view['erpSalesOrderId']}")
+    print(f"      Mailpit : http://localhost:8025/  (destinataire {email})")
     t.done()
 
 

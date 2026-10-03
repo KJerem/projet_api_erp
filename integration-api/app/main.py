@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 
 from app.errors import install_error_handlers, internal_error_response
-from app.routes import health, registrations, sessions
+from app.routes import catalog, health, registrations, sessions
 from shared.config import get_settings
 from shared.db import create_pool
 from shared.logging_setup import correlation_id_var, setup_logging
@@ -45,6 +45,7 @@ app = FastAPI(
 install_error_handlers(app)
 app.include_router(registrations.router)
 app.include_router(sessions.router)
+app.include_router(catalog.router)
 app.include_router(health.router)
 
 

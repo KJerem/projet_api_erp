@@ -87,6 +87,18 @@ class SessionView(BaseModel):
     erpItemCode: str
 
 
+class CatalogEntry(BaseModel):
+    sessionId: str
+    courseName: str | None
+    courseId: int | None
+    remainingSeats: int
+    capacity: int
+    price: float | None
+    currency: str | None
+    moodleCourseShortname: str
+    erpItemCode: str
+
+
 class ErrorResponse(BaseModel):
     error: str
     message: str

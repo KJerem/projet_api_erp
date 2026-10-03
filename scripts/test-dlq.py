@@ -2,7 +2,7 @@
 
 A. Message JSON invalide              -> rejeté (basic.reject) -> DLX -> registration.dlq
 B. Événement d'une inscription inconnue -> erreur permanente -> DLQ sans retry
-C. ERPNext arrêté (HTTP 502) durablement -> 4 tentatives (0, +2 s, +4 s, +8 s) -> FAILED,
+C. ERPNext arrêté durablement (502 / timeout) -> 4 tentatives (0, +2 s, +4 s, +8 s) -> FAILED,
    place libérée, événement registration.failed, message en DLQ avec la cause.
 
 Usage : .venv/Scripts/python scripts/test-dlq.py
@@ -60,7 +60,10 @@ def main() -> None:
     t.check("statut FAILED après épuisement des retries", view["status"] == "FAILED", view["status"])
     t.check("4 tentatives (1 + 3 retries)", view["attempts"] == 4 and history.count("RETRYING") == 3,
             f"attempts={view['attempts']} retries={history.count('RETRYING')}")
-    t.check("erreur 502 visible", "HTTP 502" in (view["lastError"] or ""), view["lastError"])
+    # Backend arrêté : selon le cache ARP, nginx répond 502 tout de suite ou laisse expirer notre timeout.
+    # Les deux sont des erreurs temporaires ; l'issue (4 tentatives puis DLQ) est identique.
+    t.check("erreur temporaire visible (HTTP 502 ou timeout ERPNext)",
+            any(s in (view["lastError"] or "") for s in ("HTTP 502", "ERPNext timeout")), view["lastError"])
     t.check("place libérée", seats(api, "SESSION-PYTHON-01") == seats_before, seats(api, "SESSION-PYTHON-01"))
     t.check("événement registration.failed émis (outbox)", sql(
         f"SELECT count(*) FROM outbox_event WHERE aggregate_id = '{reg_id}' "

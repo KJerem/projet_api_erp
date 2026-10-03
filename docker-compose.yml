@@ -325,6 +325,9 @@ services:
       <<: *hub-env
       SERVICE_NAME: integration-api
       DB_POOL_MAX: "10"
+      ERPNEXT_URL: http://erpnext-frontend:8080
+      ERPNEXT_COMPANY_NAME: ${ERPNEXT_COMPANY_NAME:-OpenTraining}
+      MOODLE_URL: http://moodle
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -379,6 +382,41 @@ services:
         condition: service_completed_successfully
       moodle-bootstrap:
         condition: service_completed_successfully
+
+  notification-worker:
+    <<: *hub
+    restart: unless-stopped
+    command: ["python", "-m", "workers.notifications.main"]
+    stop_grace_period: 15s
+    environment:
+      <<: *hub-env
+      SERVICE_NAME: notification-worker
+      DB_POOL_MAX: "2"
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      MAIL_FROM: inscriptions@opentraining.local
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+
+  audit-worker:
+    <<: *hub
+    restart: unless-stopped
+    command: ["python", "-m", "workers.audit.main"]
+    stop_grace_period: 15s
+    environment:
+      <<: *hub-env
+      SERVICE_NAME: audit-worker
+      DB_POOL_MAX: "2"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
 
   mailpit:
     image: axllent/mailpit:latest

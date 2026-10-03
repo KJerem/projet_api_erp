@@ -127,7 +127,14 @@ class ErpNextClient:
     def submit_sales_order(self, name: str) -> None:
         self._request("PUT", f"/api/resource/Sales Order/{name}", json={"docstatus": 1})
 
-    def get_item_price(self, item_code: str) -> float | None:
-        rows = self._find("Item Price", [["item_code", "=", item_code], ["price_list", "=", PRICE_LIST]],
-                          ["price_list_rate", "currency"])
-        return float(rows[0]["price_list_rate"]) if rows else None
+    def get_item_prices(self, item_codes: list[str]) -> dict[str, dict]:
+        """Prix de vente catalogue de plusieurs articles en un seul appel : {item_code: {price, currency}}."""
+        if not item_codes:
+            return {}
+        rows = self._request(
+            "GET", "/api/resource/Item Price",
+            params={"filters": json.dumps([["item_code", "in", item_codes], ["price_list", "=", PRICE_LIST]]),
+                    "fields": json.dumps(["item_code", "price_list_rate", "currency"]),
+                    "limit_page_length": len(item_codes) * 2},
+        )["data"]
+        return {r["item_code"]: {"price": float(r["price_list_rate"]), "currency": r["currency"]} for r in rows}

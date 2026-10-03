@@ -2,17 +2,17 @@
 
 Topologie (déclarée en code par chaque service au démarrage — "topology as code") :
 
-    si.events (topic) ──registration.accepted──────────────► registration.orchestrator ─┐
-                      ├─registration.confirmed/compensated──► notifications              │ rejet / délai max
-                      └─#───────────────────────────────────► audit                      │
-                                                                                         ▼
+    si.events (topic) ──registration.accepted─────────────────────► registration.orchestrator ─┐
+                      ├─registration.confirmed/compensated/failed──► notifications              │ rejet /
+                      └─#──────────────────────────────────────────► audit                      │ abandon
+                                                                                                ▼
     si.events.dlx (direct) ──<nom de queue>──► registration.dlq / notifications.dlq / audit.dlq
 
-    si.events.retry (direct) ──retry.Ns──► registration.retry.Ns (TTL N s)
-                                             └─ expiration ─► exchange par défaut ─► registration.orchestrator
+    si.events.retry (direct) ──<queue>.retry.Ns──► <queue>.retry.Ns (TTL N s, une série par queue consumer)
+                                                     └─ expiration ─► exchange par défaut ─► <queue>
 
-Les retries reviennent directement dans la queue de l'orchestrateur (exchange par défaut) : ils ne
-repassent pas par si.events, donc ne sont pas dupliqués vers l'audit ou les notifications.
+Les retries reviennent directement dans la queue d'origine (exchange par défaut) : ils ne repassent
+pas par si.events, donc ne sont pas dupliqués vers les autres consumers.
 """
 
 import json
@@ -45,7 +45,8 @@ DELIVERY_LIMIT = 10
 
 _CONSUMER_QUEUES = {
     QUEUE_ORCHESTRATOR: ["registration.accepted"],
-    QUEUE_NOTIFICATIONS: ["registration.confirmed", "registration.compensated", "notification.requested"],
+    QUEUE_NOTIFICATIONS: ["registration.confirmed", "registration.compensated", "registration.failed",
+                          "notification.requested"],
     QUEUE_AUDIT: ["#"],
 }
 _DLQS = {
@@ -55,8 +56,8 @@ _DLQS = {
 }
 
 
-def retry_queue_name(delay: int) -> str:
-    return f"registration.retry.{delay}s"
+def retry_queue_name(queue: str, delay: int) -> str:
+    return f"{queue}.retry.{delay}s"
 
 
 def connect(settings: Settings, connection_name: str, attempts: int | None = None) -> pika.BlockingConnection:
@@ -104,18 +105,19 @@ def declare_topology(channel: BlockingChannel) -> None:
         for key in routing_keys:
             channel.queue_bind(queue, EXCHANGE, routing_key=key)
 
-    for delay in RETRY_DELAYS:
-        name = retry_queue_name(delay)
-        channel.queue_declare(
-            name,
-            durable=True,
-            arguments={
-                "x-message-ttl": delay * 1000,
-                "x-dead-letter-exchange": "",  # exchange par défaut : routage direct par nom de queue
-                "x-dead-letter-routing-key": QUEUE_ORCHESTRATOR,
-            },
-        )
-        channel.queue_bind(name, RETRY_EXCHANGE, routing_key=name)
+    for queue in _CONSUMER_QUEUES:
+        for delay in RETRY_DELAYS:
+            name = retry_queue_name(queue, delay)
+            channel.queue_declare(
+                name,
+                durable=True,
+                arguments={
+                    "x-message-ttl": delay * 1000,
+                    "x-dead-letter-exchange": "",  # exchange par défaut : routage direct par nom de queue
+                    "x-dead-letter-routing-key": queue,
+                },
+            )
+            channel.queue_bind(name, RETRY_EXCHANGE, routing_key=name)
 
 
 def event_properties(event: dict, headers: dict | None = None) -> pika.BasicProperties:

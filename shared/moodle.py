@@ -86,6 +86,11 @@ class MoodleClient:
         courses = self.call("core_course_get_courses_by_field", field="shortname", value=shortname)["courses"]
         return courses[0] if courses else None
 
+    def list_courses(self) -> dict[str, dict]:
+        """Tous les cours en un seul appel (sans filtre) : {shortname: {id, fullname}}."""
+        courses = self.call("core_course_get_courses_by_field")["courses"]
+        return {c["shortname"]: {"id": c["id"], "fullname": c["fullname"]} for c in courses}
+
     def is_enrolled(self, user_id: int, course_id: int) -> bool:
         courses = self.call("core_enrol_get_users_courses", userid=user_id)
         return any(c["id"] == course_id for c in courses)

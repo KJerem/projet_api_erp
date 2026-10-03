@@ -8,14 +8,15 @@ Scénario B : RabbitMQ arrêté -> l'API accepte toujours (202), l'événement a
 Usage : .venv/Scripts/python scripts/test-outbox.py
 """
 
+import time
 import uuid
 from collections import Counter
 
 import httpx
 
-from _testlib import API_URL, Checks, compose, rabbit_queue, sql, wait_for
+from _testlib import API_URL, Checks, audited_event_types, compose, rabbit_queue, sql, wait_for
 
-QUEUE = "audit"  # reçoit tous les événements (binding "#") ; pas encore de consumer en Phase 2
+QUEUE = "audit"
 
 
 def post_registration(client: httpx.Client, tag: str) -> str:
@@ -40,18 +41,19 @@ def outbox_state(registration_id: str) -> str:
     )
 
 
+def exact_queue_depth(queue: str) -> int:
+    """Nombre exact de messages (ready + non acquittés) via rabbitmqctl, sans échantillonnage."""
+    for line in compose("exec", "-T", "rabbitmq", "rabbitmqctl", "list_queues", "--quiet", "--no-table-headers",
+                        "name", "messages").splitlines():
+        name, _, count = line.strip().partition("\t")
+        if name == queue:
+            return int(count)
+    raise RuntimeError(f"queue introuvable : {queue}")
+
+
 def queue_has_message_for(registration_id: str) -> bool:
-    """Lit (sans consommer : requeue) les messages de la queue d'audit et cherche l'inscription."""
-    from _testlib import ENV
-    port = ENV.get("RABBITMQ_MGMT_PORT", "15672")
-    resp = httpx.post(
-        f"http://localhost:{port}/api/queues/%2F/{QUEUE}/get",
-        auth=(ENV.get("RABBITMQ_USER", "opentraining"), ENV["RABBITMQ_PASSWORD"]),
-        json={"count": 1000, "ackmode": "ack_requeue_true", "encoding": "auto"},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    return any(registration_id in m["payload"] for m in resp.json())
+    """L'événement a traversé RabbitMQ : l'audit-worker (binding « # ») l'a reçu et journalisé."""
+    return "registration.accepted" in audited_event_types(registration_id)
 
 
 def main() -> None:
@@ -72,12 +74,12 @@ def main() -> None:
     t.check("événement dans l'outbox, published_at IS NULL", outbox_state(reg_a) == "pending", outbox_state(reg_a))
     pending = client.get("/ready").json()["pendingOutboxEvents"]
     t.check("/ready signale l'événement en attente", pending >= 1, pending)
-    t.check("aucun message dans RabbitMQ pour cette inscription", not queue_has_message_for(reg_a))
+    t.check("aucun événement transmis via RabbitMQ (audit vide)", not queue_has_message_for(reg_a))
 
     compose("start", "outbox-dispatcher")
     t.check("après redémarrage : événement marqué publié",
             wait_for(lambda: outbox_state(reg_a) == "published", timeout=60), outbox_state(reg_a))
-    t.check("message présent dans la queue RabbitMQ", wait_for(lambda: queue_has_message_for(reg_a), timeout=15))
+    t.check("événement reçu via RabbitMQ par l'audit-worker", wait_for(lambda: queue_has_message_for(reg_a), timeout=15))
 
     # --- Scénario B : RabbitMQ arrêté --------------------------------------------------------------
     print("\n-- B. RabbitMQ arrêté")
@@ -92,7 +94,7 @@ def main() -> None:
     t.check("RabbitMQ redémarré", wait_for(lambda: rabbit_queue(QUEUE) is not None, timeout=90))
     t.check("dispatcher reconnecté : événement publié",
             wait_for(lambda: outbox_state(reg_b) == "published", timeout=90), outbox_state(reg_b))
-    t.check("message présent dans la queue RabbitMQ", wait_for(lambda: queue_has_message_for(reg_b), timeout=15))
+    t.check("événement reçu via RabbitMQ par l'audit-worker", wait_for(lambda: queue_has_message_for(reg_b), timeout=15))
 
     # --- Scénario C : 3 dispatchers concurrents (FOR UPDATE SKIP LOCKED) ---------------------------
     n = 30
@@ -103,7 +105,10 @@ def main() -> None:
     # Le registration-worker consommerait les messages comptés : on le met en pause pendant la mesure.
     compose("stop", "registration-worker")
     compose("up", "-d", "--scale", "outbox-dispatcher=3", "--no-recreate", "outbox-dispatcher")
-    before = rabbit_queue("registration.orchestrator")["messages"]
+    # Compteur exact via rabbitmqctl (l'API de management est échantillonnée toutes les 5 s),
+    # mesuré une fois le worker arrêté (un message en cours de traitement est alors re-déposé).
+    time.sleep(2)
+    before = exact_queue_depth("registration.orchestrator")
     for i in range(n):
         client.post("/api/v1/registrations", headers={"Idempotency-Key": f"outbox-c-{run}-{i}"}, json={
             "student": {"email": f"outbox-c{i}-{run}@example.org", "firstName": "Multi", "lastName": str(i)},
@@ -113,8 +118,9 @@ def main() -> None:
         f"SELECT count(*) FROM outbox_event o JOIN registration r ON o.aggregate_id = r.id::text "
         f"WHERE r.session_id = '{session_id}' AND o.event_type = 'registration.accepted' "
         f"AND o.published_at IS NOT NULL") == str(n), timeout=60))
-    wait_for(lambda: rabbit_queue("registration.orchestrator")["messages"] - before >= n, timeout=15)
-    delta = rabbit_queue("registration.orchestrator")["messages"] - before
+    wait_for(lambda: exact_queue_depth("registration.orchestrator") - before >= n, timeout=15)
+    time.sleep(2)  # laisse le temps à un éventuel doublon d'arriver avant de conclure
+    delta = exact_queue_depth("registration.orchestrator") - before
     t.check(f"exactement {n} messages dans registration.orchestrator (ni doublon ni perte)", delta == n, delta)
     publishers = Counter(
         line.split("|", 1)[0].strip()  # préfixe "outbox-dispatcher-N" ajouté par docker compose logs
@@ -124,6 +130,11 @@ def main() -> None:
     t.check("travail réparti entre plusieurs dispatchers", len(publishers) >= 2, dict(publishers))
     compose("up", "-d", "--scale", "outbox-dispatcher=1", "outbox-dispatcher")
     compose("start", "registration-worker")  # les inscriptions du scénario seront traitées normalement
+    # On attend la fin de ce backlog pour ne pas retarder les tests lancés ensuite.
+    drained = wait_for(lambda: sql(
+        f"SELECT count(*) FROM registration WHERE session_id = '{session_id}' "
+        "AND status NOT IN ('CONFIRMED', 'COMPENSATED', 'FAILED')") == "0", timeout=240, interval=3)
+    t.check(f"les {n} inscriptions du scénario sont traitées jusqu'au bout", drained)
 
     t.done()
 
