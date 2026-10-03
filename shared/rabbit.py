@@ -85,7 +85,9 @@ def declare_topology(channel: BlockingChannel) -> None:
     channel.exchange_declare(RETRY_EXCHANGE, exchange_type="direct", durable=True)
 
     for queue, dlq in _DLQS.items():
-        channel.queue_declare(dlq, durable=True, arguments={"x-queue-type": "quorum"})
+        # DLQ en queue classique durable : pas de delivery-limit, un message mort inspecté (peek + requeue)
+        # plusieurs fois n'est jamais supprimé (une quorum queue l'abandonnerait au-delà de sa limite).
+        channel.queue_declare(dlq, durable=True, arguments={"x-queue-type": "classic"})
         channel.queue_bind(dlq, DLX, routing_key=queue)
 
     for queue, routing_keys in _CONSUMER_QUEUES.items():

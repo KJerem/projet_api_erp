@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Remet l'Integration Hub dans un état propre avant une démo :
-#   - vide toutes les queues RabbitMQ (métier, retry, DLQ) ;
+#   - supprime toutes les queues RabbitMQ (métier, retry, DLQ), recréées par les services ;
 #   - recrée le schéma de la base d'intégration (migrations + sessions du catalog.json).
 # Ne touche NI à Moodle NI à ERPNext (leurs données de test restent en place).
 #
@@ -22,10 +22,12 @@ HUB_SERVICES=$(docker compose config --services | grep -E '^(integration-api|out
 echo "1/4 arrêt des services du Hub : $(echo $HUB_SERVICES)"
 docker compose stop $HUB_SERVICES >/dev/null 2>&1
 
-echo "2/4 purge des queues RabbitMQ"
+# Suppression (et non simple purge) : les services redéclarent la topologie à jour au redémarrage,
+# ce qui applique aussi d'éventuels changements d'arguments de queue (impossibles à modifier en place).
+echo "2/4 suppression des queues RabbitMQ (redéclarées au redémarrage)"
 for queue in $(docker compose exec -T rabbitmq rabbitmqctl list_queues --quiet --no-table-headers name | tr -d '\r'); do
-  docker compose exec -T rabbitmq rabbitmqctl purge_queue --quiet "$queue" >/dev/null
-  echo "      purgée : $queue"
+  docker compose exec -T rabbitmq rabbitmqctl delete_queue --quiet "$queue" >/dev/null
+  echo "      supprimée : $queue"
 done
 
 echo "3/4 recréation du schéma de la base d'intégration"

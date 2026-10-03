@@ -20,18 +20,23 @@ CUSTOMER_GROUP = "Commercial"
 TERRITORY = "France"
 
 
+def _plain_text(html: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
+
+
 def _frappe_message(resp: httpx.Response) -> str:
     """Extrait un message lisible d'une erreur Frappe (exc_type + _server_messages)."""
     try:
         body = resp.json()
     except ValueError:
-        return resp.text[:300]
+        # Page d'erreur HTML (ex. 502 nginx quand le backend est arrêté).
+        return _plain_text(resp.text)[:200]
     parts = [body.get("exc_type") or ""]
     raw = body.get("_server_messages")
     if raw:
         try:
             messages = [json.loads(m).get("message", "") for m in json.loads(raw)]
-            parts.append(re.sub(r"<[^>]+>", " ", " ".join(messages)))
+            parts.append(_plain_text(" ".join(messages)))
         except (ValueError, AttributeError):
             pass
     return " ".join(p for p in parts if p).strip()[:500] or resp.text[:300]

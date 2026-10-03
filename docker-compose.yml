@@ -367,7 +367,9 @@ services:
       ERPNEXT_URL: http://erpnext-frontend:8080
       ERPNEXT_COMPANY_NAME: ${ERPNEXT_COMPANY_NAME:-OpenTraining}
       MOODLE_URL: http://moodle
+      # Injection de pannes pour les tests (désactivées par défaut).
       CRASH_AFTER_MOODLE: ${CRASH_AFTER_MOODLE:-false}
+      ERP_STEP_DELAY_SECONDS: ${ERP_STEP_DELAY_SECONDS:-0}
     depends_on:
       migrate:
         condition: service_completed_successfully

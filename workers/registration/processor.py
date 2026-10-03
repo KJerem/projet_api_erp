@@ -19,6 +19,7 @@ l'apprenant est inscrit dans Moodle : désinscription Moodle + place libérée +
 
 import logging
 import os
+import time
 import uuid
 from contextlib import contextmanager
 
@@ -55,9 +56,14 @@ class RegistrationProcessor:
         self.erpnext_url = os.environ.get("ERPNEXT_URL", "http://erpnext-frontend:8080")
         self.moodle_url = os.environ.get("MOODLE_URL", "http://moodle")
         self.company = os.environ.get("ERPNEXT_COMPANY_NAME", "OpenTraining")
+        # Injection de pannes (tests uniquement, désactivées par défaut).
         self.crash_after_moodle = _env_flag("CRASH_AFTER_MOODLE")
+        self.erp_step_delay = float(os.environ.get("ERP_STEP_DELAY_SECONDS", "0") or 0)
         if self.crash_after_moodle:
             log.warning("mode CRASH_AFTER_MOODLE actif : le worker plantera juste après une inscription Moodle")
+        if self.erp_step_delay:
+            log.warning("ERP_STEP_DELAY_SECONDS actif : pause avant l'étape Sales Order",
+                        extra={"delaySeconds": self.erp_step_delay})
 
     # ===================================================================== API du Consumer
     def handle(self, event: dict, attempt: int) -> None:
@@ -161,6 +167,8 @@ class RegistrationProcessor:
             self._set_status(conn, reg_id, "MOODLE_ENROLLED", f"user {user_id} inscrit au cours {course_id}")
 
         # --- ERPNext ERP : Sales Order (trace administrative) ---------------------------------------
+        if self.erp_step_delay:
+            time.sleep(self.erp_step_delay)  # fenêtre laissée au test pour couper ERPNext après Moodle
         try:
             sales_order = self._mapping(reg_id, ERP_SALES_ORDER)
             if sales_order is None:

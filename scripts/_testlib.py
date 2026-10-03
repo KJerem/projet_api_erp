@@ -100,10 +100,59 @@ def publish_raw(routing_key: str, body: bytes, exchange: str = "si.events", head
             content_type="application/json", delivery_mode=2, message_id=message_id, headers=headers or {}))
 
 
+def dlq_messages(queue: str = "registration.dlq") -> list[dict]:
+    """Lit la DLQ sans la consommer (get + requeue) : [{"payload": str, "headers": dict}, ...]."""
+    port = ENV.get("RABBITMQ_MGMT_PORT", "15672")
+    resp = httpx.post(
+        f"http://localhost:{port}/api/queues/%2F/{queue}/get",
+        auth=(ENV.get("RABBITMQ_USER", "opentraining"), ENV["RABBITMQ_PASSWORD"]),
+        json={"count": 500, "ackmode": "ack_requeue_true", "encoding": "auto"}, timeout=15)
+    resp.raise_for_status()
+    return [{"payload": m["payload"], "headers": m["properties"].get("headers", {})} for m in resp.json()]
+
+
+def dlq_find(marker: str, queue: str = "registration.dlq") -> dict | None:
+    return next((m for m in dlq_messages(queue) if marker in m["payload"]), None)
+
+
 def outbox_event(registration_id: str, event_type: str = "registration.accepted") -> str:
     """Enveloppe JSON de l'événement tel qu'écrit dans l'outbox."""
     return sql(f"SELECT payload::text FROM outbox_event WHERE aggregate_id = '{registration_id}' "
                f"AND event_type = '{event_type}'")
+
+
+FINAL_STATUSES = {"CONFIRMED", "COMPENSATED", "FAILED"}
+
+
+def register(api: httpx.Client, tag: str, session_id: str = "SESSION-PYTHON-01") -> tuple[str, str]:
+    """Crée une inscription de test ; retourne (registrationId, email)."""
+    email = f"{tag}@example.org"
+    resp = api.post("/api/v1/registrations", headers={"Idempotency-Key": tag, "X-Correlation-ID": f"corr-{tag}"},
+                    json={"student": {"email": email, "firstName": "Test", "lastName": tag[:40]},
+                          "company": {"name": "RESILIENCE CORP"}, "sessionId": session_id})
+    resp.raise_for_status()
+    return resp.json()["registrationId"], email
+
+
+def create_session(api: httpx.Client, session_id: str, capacity: int, course: str, item: str) -> None:
+    api.post("/api/v1/sessions", json={"sessionId": session_id, "capacity": capacity,
+                                      "moodleCourseShortname": course, "erpItemCode": item}).raise_for_status()
+
+
+def seats(api: httpx.Client, session_id: str) -> int:
+    return api.get(f"/api/v1/sessions/{session_id}").json()["remainingSeats"]
+
+
+def wait_until_status(api: httpx.Client, registration_id: str, predicate, timeout: float = 60) -> dict:
+    """Attend qu'une condition sur la vue de l'inscription soit vraie (ex. RETRYING avec attempts >= 2)."""
+    deadline = time.monotonic() + timeout
+    view: dict = {}
+    while time.monotonic() < deadline:
+        view = api.get(f"/api/v1/registrations/{registration_id}").json()
+        if predicate(view):
+            return view
+        time.sleep(0.3)
+    return view
 
 
 def wait_status(client: httpx.Client, registration_id: str, statuses: set[str], timeout: float = 90) -> dict:
