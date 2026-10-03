@@ -15,7 +15,6 @@ const FUNCTIONS = [
     'core_user_get_users_by_field',
     'core_user_create_users',
     'core_enrol_get_users_courses',
-    'core_enrol_get_enrolled_users',
     'enrol_manual_enrol_users',
     'enrol_manual_unenrol_users',
     'core_course_get_courses_by_field',

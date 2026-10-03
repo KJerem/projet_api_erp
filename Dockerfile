@@ -1,5 +1,5 @@
 # Image unique de l'Integration Hub : API, migrations et workers (la commande change par service).
-FROM python:3.12-slim
+FROM python:3.12.15-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
