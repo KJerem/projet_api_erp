@@ -338,6 +338,23 @@ services:
     ports:
       - "${API_PORT:-8000}:8000"
 
+  outbox-dispatcher:
+    <<: *hub
+    restart: unless-stopped
+    command: ["python", "-m", "workers.outbox.main"]
+    stop_grace_period: 15s
+    environment:
+      <<: *hub-env
+      SERVICE_NAME: outbox-dispatcher
+      DB_POOL_MAX: "2"
+      OUTBOX_BATCH_SIZE: "50"
+      OUTBOX_POLL_INTERVAL_SECONDS: "0.5"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
   mailpit:
     image: axllent/mailpit:latest
     restart: unless-stopped
