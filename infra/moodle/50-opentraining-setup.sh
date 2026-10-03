@@ -42,5 +42,8 @@ fi
 mkdir -p "${SECRETS_DIR}"
 umask 077
 printf '%s' "${TOKEN}" > "${SECRETS_DIR}/moodle_token.tmp"
+# Lisible uniquement par l'utilisateur non-root de l'Integration Hub (uid/gid 10001).
+chown "${HUB_UID:-10001}:${HUB_GID:-10001}" "${SECRETS_DIR}/moodle_token.tmp"
+chmod 0440 "${SECRETS_DIR}/moodle_token.tmp"
 mv "${SECRETS_DIR}/moodle_token.tmp" "${SECRETS_DIR}/moodle_token"
 echo "[opentraining] token Web Service écrit dans ${SECRETS_DIR}/moodle_token"

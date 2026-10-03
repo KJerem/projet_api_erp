@@ -39,9 +39,19 @@ def wait_until(service: str, what: str, probe, timeout: float = 900, interval: f
         time.sleep(interval)
 
 
+# Propriétaire des secrets : l'utilisateur non-root de l'image Integration Hub (voir Dockerfile racine).
+HUB_UID = int(os.environ.get("HUB_UID", "10001"))
+HUB_GID = int(os.environ.get("HUB_GID", "10001"))
+
+
+def secure_secret(path: Path) -> None:
+    os.chown(path, HUB_UID, HUB_GID)
+    os.chmod(path, 0o440)
+
+
 def write_secret(name: str, content: str) -> None:
     SECRETS_DIR.mkdir(parents=True, exist_ok=True)
     tmp = SECRETS_DIR / f"{name}.tmp"
     tmp.write_text(content, encoding="utf-8")
-    os.chmod(tmp, 0o600)
+    secure_secret(tmp)
     tmp.replace(SECRETS_DIR / name)

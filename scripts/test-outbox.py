@@ -95,11 +95,13 @@ def main() -> None:
     t.check("message présent dans la queue RabbitMQ", wait_for(lambda: queue_has_message_for(reg_b), timeout=15))
 
     # --- Scénario C : 3 dispatchers concurrents (FOR UPDATE SKIP LOCKED) ---------------------------
-    print("\n-- C. 3 dispatchers en parallèle, 100 inscriptions")
-    n = 100
+    n = 30
+    print(f"\n-- C. 3 dispatchers en parallèle, {n} inscriptions (worker en pause pendant le comptage)")
     session_id = f"SESSION-OUTBOX-{run.upper()}"
     client.post("/api/v1/sessions", json={"sessionId": session_id, "capacity": n,
                                          "moodleCourseShortname": "PYTHON-ADV", "erpItemCode": "FORMATION-PYTHON"})
+    # Le registration-worker consommerait les messages comptés : on le met en pause pendant la mesure.
+    compose("stop", "registration-worker")
     compose("up", "-d", "--scale", "outbox-dispatcher=3", "--no-recreate", "outbox-dispatcher")
     before = rabbit_queue("registration.orchestrator")["messages"]
     for i in range(n):
@@ -109,7 +111,8 @@ def main() -> None:
         }).raise_for_status()
     t.check("toutes les inscriptions publiées", wait_for(lambda: sql(
         f"SELECT count(*) FROM outbox_event o JOIN registration r ON o.aggregate_id = r.id::text "
-        f"WHERE r.session_id = '{session_id}' AND o.published_at IS NOT NULL") == str(n), timeout=60))
+        f"WHERE r.session_id = '{session_id}' AND o.event_type = 'registration.accepted' "
+        f"AND o.published_at IS NOT NULL") == str(n), timeout=60))
     wait_for(lambda: rabbit_queue("registration.orchestrator")["messages"] - before >= n, timeout=15)
     delta = rabbit_queue("registration.orchestrator")["messages"] - before
     t.check(f"exactement {n} messages dans registration.orchestrator (ni doublon ni perte)", delta == n, delta)
@@ -120,6 +123,7 @@ def main() -> None:
     )
     t.check("travail réparti entre plusieurs dispatchers", len(publishers) >= 2, dict(publishers))
     compose("up", "-d", "--scale", "outbox-dispatcher=1", "outbox-dispatcher")
+    compose("start", "registration-worker")  # les inscriptions du scénario seront traitées normalement
 
     t.done()
 

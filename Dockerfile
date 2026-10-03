@@ -16,5 +16,6 @@ COPY integration-api/ integration-api/
 COPY workers/ workers/
 COPY infra/catalog.json config/catalog.json
 
-RUN useradd --system --uid 10001 hub
+# uid/gid 10001 : propriétaire des secrets écrits par les bootstraps (mode 0440).
+RUN groupadd --system --gid 10001 hub && useradd --system --uid 10001 --gid 10001 hub
 USER hub

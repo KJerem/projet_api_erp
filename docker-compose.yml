@@ -355,6 +355,29 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  registration-worker:
+    <<: *hub
+    restart: unless-stopped
+    command: ["python", "-m", "workers.registration.main"]
+    stop_grace_period: 20s
+    environment:
+      <<: *hub-env
+      SERVICE_NAME: registration-worker
+      DB_POOL_MAX: "4"
+      ERPNEXT_URL: http://erpnext-frontend:8080
+      ERPNEXT_COMPANY_NAME: ${ERPNEXT_COMPANY_NAME:-OpenTraining}
+      MOODLE_URL: http://moodle
+      CRASH_AFTER_MOODLE: ${CRASH_AFTER_MOODLE:-false}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      erpnext-bootstrap:
+        condition: service_completed_successfully
+      moodle-bootstrap:
+        condition: service_completed_successfully
+
   mailpit:
     image: axllent/mailpit:latest
     restart: unless-stopped

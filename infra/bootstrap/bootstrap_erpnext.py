@@ -12,7 +12,7 @@ from datetime import date
 
 import httpx
 
-from common import SECRETS_DIR, fail, load_catalog, log, wait_until, write_secret
+from common import SECRETS_DIR, fail, load_catalog, log, secure_secret, wait_until, write_secret
 
 SERVICE = "erpnext-bootstrap"
 BASE_URL = os.environ.get("ERPNEXT_URL", "http://erpnext-frontend:8080")
@@ -129,6 +129,7 @@ def main() -> None:
     complete_setup_wizard()
 
     creds = load_valid_credentials() or generate_credentials()
+    secure_secret(SECRETS_DIR / SECRET_FILE)
 
     with httpx.Client(base_url=BASE_URL, headers=token_header(creds), timeout=30) as client:
         for session in load_catalog():
