@@ -64,6 +64,9 @@ Le client doit se baser sur `error`, pas sur `message`.
 | `CATALOG_DEPENDENCY_UNAVAILABLE` | 503 | GET catalog | Moodle ou ERPNext injoignable ou en erreur, et `partial` absent ou `false` | sans objet | `catalog.py` |
 | `SERVICE_UNAVAILABLE` | 503 | toute route qui accède à la base | `psycopg.OperationalError` ou `PoolTimeout` | non (rien n'a été commité) | `errors.py` |
 | `INTERNAL_ERROR` | 500 | tous | Exception non prévue, interceptée par le middleware | non | `main.py`, `errors.py` |
+| `MALFORMED_BODY` | 400 | tous les POST | Corps illisible avant validation, typiquement un JSON non encodé en UTF-8 (accents en latin-1). Un JSON syntaxiquement invalide mais bien encodé reste un `422 VALIDATION_ERROR` (`json_invalid`) | non (rien n'est enregistré) | `errors.py` (`http_error`) |
+| `NOT_FOUND` | 404 | toute URL | Route inexistante | sans objet | `errors.py` (`http_error`) |
+| `METHOD_NOT_ALLOWED` | 405 | toute route | Méthode non prévue sur un chemin existant ; l'en-tête `Allow` est conservé | sans objet | `errors.py` (`http_error`) |
 
 Remarque sur l'ordre des contrôles du `POST /api/v1/registrations` : FastAPI valide le body **avant**
 d'exécuter la fonction de route. Une requête sans `Idempotency-Key` **et** avec un body invalide reçoit donc

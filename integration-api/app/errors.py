@@ -8,6 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from psycopg import OperationalError
 from psycopg_pool import PoolTimeout
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from shared.logging_setup import correlation_id_var
 
@@ -25,6 +26,21 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def api_error(_: Request, exc: ApiError) -> JSONResponse:
         return JSONResponse(status_code=exc.status_code, content=exc.body)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        # Erreurs levées par FastAPI/Starlette elles-mêmes (avant nos routes), ramenées au format commun.
+        if exc.status_code == 400 and "parsing the body" in str(exc.detail):
+            # Corps illisible : typiquement un JSON non encodé en UTF-8 (accents envoyés en latin-1).
+            error, message = "MALFORMED_BODY", "Le corps de la requête est illisible : JSON encodé en UTF-8 attendu."
+        elif exc.status_code == 404:
+            error, message = "NOT_FOUND", f"Ressource inconnue : {request.method} {request.url.path}"
+        elif exc.status_code == 405:
+            error, message = "METHOD_NOT_ALLOWED", f"Méthode {request.method} non autorisée sur {request.url.path}"
+        else:
+            error, message = "HTTP_ERROR", str(exc.detail)
+        return JSONResponse(status_code=exc.status_code, content={"error": error, "message": message},
+                            headers=getattr(exc, "headers", None))  # conserve par ex. l'en-tête Allow du 405
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:

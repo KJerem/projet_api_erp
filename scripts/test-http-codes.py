@@ -68,6 +68,19 @@ def main() -> None:
     r = c.get("/api/v1/registrations/pas-un-uuid")
     t.check("id non UUID -> 422", r.status_code == 422, r.json().get("error"))
 
+    # Erreurs levées par le framework lui-même : même format {"error", "message"} que le reste de l'API.
+    latin1 = ('{"student":{"email":"x@example.org","firstName":"Chloé","lastName":"D"},'
+              '"company":{"name":"A"},"sessionId":"SESSION-PYTHON-01"}').encode("latin-1")
+    r = c.post("/api/v1/registrations", content=latin1,
+               headers={"Content-Type": "application/json", "Idempotency-Key": str(uuid.uuid4())})
+    t.check("body non UTF-8 -> 400 MALFORMED_BODY", r.status_code == 400 and r.json().get("error") == "MALFORMED_BODY",
+            r.json())
+    r = c.get("/api/v1/inexistant")
+    t.check("route inconnue -> 404 NOT_FOUND", r.status_code == 404 and r.json().get("error") == "NOT_FOUND", r.json())
+    r = c.delete("/api/v1/sessions")
+    t.check("méthode non autorisée -> 405 METHOD_NOT_ALLOWED + Allow",
+            r.status_code == 405 and r.json().get("error") == "METHOD_NOT_ALLOWED" and "allow" in r.headers, r.json())
+
     print("      (503 : couvert par scripts/test-db-down.sh — base d'intégration arrêtée)")
     t.done()
 
