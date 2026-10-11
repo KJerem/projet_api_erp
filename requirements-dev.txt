@@ -1,0 +1,6 @@
+# Dépendances côté poste (scripts de test/démo et tests unitaires pytest), à installer dans le venv du projet :
+#   python -m venv .venv && .venv/Scripts/python -m pip install -r requirements-dev.txt   (Windows)
+#   python -m venv .venv && .venv/bin/python -m pip install -r requirements-dev.txt       (Linux/macOS)
+# Les tests unitaires importent le code du Hub : ses dépendances sont donc incluses.
+-r requirements.txt
+pytest==9.1.1

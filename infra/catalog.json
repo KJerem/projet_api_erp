@@ -1,0 +1,16 @@
+{
+  "sessions": [
+    {
+      "sessionId": "SESSION-PYTHON-01",
+      "capacity": 50,
+      "course": { "shortname": "PYTHON-ADV", "fullname": "Python avancé" },
+      "erp": { "itemCode": "FORMATION-PYTHON", "itemName": "Formation Python avancé", "price": 850 }
+    },
+    {
+      "sessionId": "SESSION-CONCURRENCY",
+      "capacity": 1,
+      "course": { "shortname": "CONCURRENCY", "fullname": "Concurrence et systèmes distribués" },
+      "erp": { "itemCode": "FORMATION-CONCURRENCY", "itemName": "Formation Concurrence", "price": 300 }
+    }
+  ]
+}

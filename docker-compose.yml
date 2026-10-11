@@ -1,0 +1,442 @@
+name: opentraining
+
+# ---------------------------------------------------------------------------
+# ERPNext v16.37.0 — repris du pwd.yml officiel de frappe/frappe_docker,
+# services préfixés "erpnext-" et secrets externalisés dans .env.
+# ---------------------------------------------------------------------------
+x-erpnext-image: &erpnext-image
+  image: frappe/erpnext:v16.37.0
+  networks: [si]
+  volumes:
+    - erpnext-sites:/home/frappe/frappe-bench/sites
+    - erpnext-logs:/home/frappe/frappe-bench/logs
+
+x-erpnext-redis-env: &erpnext-redis-env
+  FRAPPE_REDIS_CACHE: redis://erpnext-redis-cache:6379
+  FRAPPE_REDIS_QUEUE: redis://erpnext-redis-queue:6379
+
+# ---------------------------------------------------------------------------
+# Integration Hub — une seule image (Dockerfile racine), une commande par service.
+# ---------------------------------------------------------------------------
+x-hub-env: &hub-env
+  LOG_LEVEL: INFO
+  INTEGRATION_DB_HOST: integration-db
+  INTEGRATION_DB_NAME: ${INTEGRATION_DB_NAME:-integration}
+  INTEGRATION_DB_USER: ${INTEGRATION_DB_USER:-integration}
+  INTEGRATION_DB_PASSWORD: ${INTEGRATION_DB_PASSWORD}
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_USER: ${RABBITMQ_USER:-opentraining}
+  RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+  HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:-5}
+  SECRETS_DIR: /secrets
+
+# L'image est construite par le service `migrate` uniquement (évite des builds concurrents du même tag).
+x-hub: &hub
+  image: opentraining/integration-hub:latest
+  pull_policy: never
+  networks: [si]
+  volumes:
+    - integration-secrets:/secrets:ro
+
+x-erpnext-after-config: &erpnext-after-config
+  erpnext-configurator:
+    condition: service_completed_successfully
+
+services:
+  erpnext-configurator:
+    <<: *erpnext-image
+    restart: "no"
+    entrypoint: ["bash", "-c"]
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host $$DB_HOST;
+        bench set-config -gp db_port $$DB_PORT;
+        bench set-config -g redis_cache "redis://$$REDIS_CACHE";
+        bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
+        bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
+        bench set-config -gp socketio_port $$SOCKETIO_PORT;
+    environment:
+      DB_HOST: erpnext-db
+      DB_PORT: "3306"
+      REDIS_CACHE: erpnext-redis-cache:6379
+      REDIS_QUEUE: erpnext-redis-queue:6379
+      SOCKETIO_PORT: "9000"
+
+  # Ajout au pwd.yml : l'encryption_key est fixée dès la création du site. Sinon Frappe
+  # la génère paresseusement au 1er secret chiffré, ce qui provoque une course entre
+  # workers gunicorn (clé API ERPNext indéchiffrable, 401 "Encryption key is invalid").
+  erpnext-create-site:
+    <<: *erpnext-image
+    restart: "no"
+    entrypoint: ["bash", "-c"]
+    depends_on:
+      erpnext-db:
+        condition: service_healthy
+      <<: *erpnext-after-config
+    environment:
+      ADMIN_PASSWORD: ${ERPNEXT_ADMIN_PASSWORD:?définir ERPNEXT_ADMIN_PASSWORD dans .env}
+      DB_ROOT_PASSWORD: ${ERPNEXT_DB_ROOT_PASSWORD:?définir ERPNEXT_DB_ROOT_PASSWORD dans .env}
+    command:
+      - >
+        wait-for-it -t 120 erpnext-db:3306;
+        wait-for-it -t 120 erpnext-redis-cache:6379;
+        wait-for-it -t 120 erpnext-redis-queue:6379;
+        export start=`date +%s`;
+        until [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".db_host // empty"` ]] && \
+          [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".redis_cache // empty"` ]] && \
+          [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".redis_queue // empty"` ]];
+        do
+          echo "Waiting for sites/common_site_config.json to be created";
+          sleep 5;
+          if (( `date +%s`-start > 120 )); then
+            echo "could not find sites/common_site_config.json with required keys";
+            exit 1
+          fi
+        done;
+        echo "sites/common_site_config.json found";
+        if [ -d "sites/frontend" ]; then
+          echo "Site frontend already exists, skipping creation";
+        else
+          bench new-site --mariadb-user-host-login-scope='%' --admin-password="$$ADMIN_PASSWORD" --db-root-username=root --db-root-password="$$DB_ROOT_PASSWORD" --install-app erpnext --set-default frontend;
+        fi;
+        if [[ -z `jq -r ".encryption_key // empty" sites/frontend/site_config.json` ]]; then
+          bench --site frontend set-config encryption_key "`env/bin/python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`";
+        fi;
+
+  erpnext-backend:
+    <<: *erpnext-image
+    restart: unless-stopped
+    depends_on: *erpnext-after-config
+
+  erpnext-frontend:
+    <<: *erpnext-image
+    restart: unless-stopped
+    command: ["nginx-entrypoint.sh"]
+    depends_on:
+      - erpnext-backend
+      - erpnext-websocket
+    environment:
+      BACKEND: erpnext-backend:8000
+      FRAPPE_SITE_NAME_HEADER: frontend
+      SOCKETIO: erpnext-websocket:9000
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      PROXY_READ_TIMEOUT: 600
+      CLIENT_MAX_BODY_SIZE: 50m
+    ports:
+      - "${ERPNEXT_PORT:-8080}:8080"
+
+  erpnext-websocket:
+    <<: *erpnext-image
+    restart: unless-stopped
+    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+    environment: *erpnext-redis-env
+    depends_on: *erpnext-after-config
+
+  erpnext-queue-long:
+    <<: *erpnext-image
+    restart: unless-stopped
+    command: ["bench", "worker", "--queue", "long,default,short"]
+    environment: *erpnext-redis-env
+    depends_on: *erpnext-after-config
+
+  erpnext-queue-short:
+    <<: *erpnext-image
+    restart: unless-stopped
+    command: ["bench", "worker", "--queue", "short,default"]
+    environment: *erpnext-redis-env
+    depends_on: *erpnext-after-config
+
+  erpnext-scheduler:
+    <<: *erpnext-image
+    restart: unless-stopped
+    command: ["bench", "schedule"]
+    depends_on: *erpnext-after-config
+
+  erpnext-db:
+    image: mariadb:11.8
+    restart: unless-stopped
+    networks: [si]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 5s
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+    environment:
+      MARIADB_ROOT_PASSWORD: ${ERPNEXT_DB_ROOT_PASSWORD:?définir ERPNEXT_DB_ROOT_PASSWORD dans .env}
+    volumes:
+      - erpnext-db-data:/var/lib/mysql
+
+  erpnext-redis-queue:
+    image: redis:6.2-alpine
+    restart: unless-stopped
+    networks: [si]
+    volumes:
+      - erpnext-redis-queue-data:/data
+
+  erpnext-redis-cache:
+    image: redis:6.2-alpine
+    restart: unless-stopped
+    networks: [si]
+
+  # Bootstrap ERPNext par l'API REST : setup wizard, clés API, articles + prix.
+  erpnext-bootstrap:
+    build: ./infra/bootstrap
+    restart: on-failure
+    command: ["python", "bootstrap_erpnext.py"]
+    networks: [si]
+    depends_on:
+      erpnext-create-site:
+        condition: service_completed_successfully
+      erpnext-frontend:
+        condition: service_started
+    environment:
+      ERPNEXT_URL: http://erpnext-frontend:8080
+      ERPNEXT_ADMIN_PASSWORD: ${ERPNEXT_ADMIN_PASSWORD}
+      ERPNEXT_COMPANY_NAME: ${ERPNEXT_COMPANY_NAME:-OpenTraining}
+      ERPNEXT_COMPANY_ABBR: ${ERPNEXT_COMPANY_ABBR:-OT}
+    volumes:
+      - integration-secrets:/secrets
+      - ./infra/catalog.json:/config/catalog.json:ro
+
+  # -------------------------------------------------------------------------
+  # Moodle 5.3.0 (LMS)
+  # -------------------------------------------------------------------------
+  moodle-db:
+    image: postgres:17.11
+    restart: unless-stopped
+    networks: [si]
+    environment:
+      POSTGRES_DB: moodle
+      POSTGRES_USER: moodle
+      POSTGRES_PASSWORD: ${MOODLE_DB_PASSWORD:?définir MOODLE_DB_PASSWORD dans .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U moodle -d moodle"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - moodle-db-data:/var/lib/postgresql/data
+
+  moodle:
+    build: ./infra/moodle
+    image: opentraining/moodle:5.3.0
+    restart: unless-stopped
+    networks: [si]
+    depends_on:
+      moodle-db:
+        condition: service_healthy
+    environment:
+      MOODLE_DB_HOST: moodle-db
+      MOODLE_DB_NAME: moodle
+      MOODLE_DB_USER: moodle
+      MOODLE_DB_PASSWORD: ${MOODLE_DB_PASSWORD}
+      MOODLE_WWWROOT: http://localhost:${MOODLE_PORT:-8081}
+      MOODLE_ADMIN_USER: ${MOODLE_ADMIN_USER:-admin}
+      MOODLE_ADMIN_PASSWORD: ${MOODLE_ADMIN_PASSWORD:?définir MOODLE_ADMIN_PASSWORD dans .env}
+      MOODLE_ADMIN_EMAIL: ${MOODLE_ADMIN_EMAIL:-admin@opentraining.local}
+    ports:
+      - "${MOODLE_PORT:-8081}:80"
+    volumes:
+      - moodle-data:/var/www/moodledata
+      - integration-secrets:/secrets
+
+  # Bootstrap Moodle par les Web Services : création des cours.
+  moodle-bootstrap:
+    build: ./infra/bootstrap
+    restart: on-failure
+    command: ["python", "bootstrap_moodle.py"]
+    networks: [si]
+    depends_on:
+      moodle:
+        condition: service_healthy
+    environment:
+      MOODLE_URL: http://moodle
+    volumes:
+      - integration-secrets:/secrets:ro
+      - ./infra/catalog.json:/config/catalog.json:ro
+
+  # -------------------------------------------------------------------------
+  # Infrastructure de l'Integration Hub
+  # -------------------------------------------------------------------------
+  integration-db:
+    image: postgres:17.11
+    restart: unless-stopped
+    networks: [si]
+    environment:
+      POSTGRES_DB: ${INTEGRATION_DB_NAME:-integration}
+      POSTGRES_USER: ${INTEGRATION_DB_USER:-integration}
+      POSTGRES_PASSWORD: ${INTEGRATION_DB_PASSWORD:?définir INTEGRATION_DB_PASSWORD dans .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "${INTEGRATION_DB_PORT:-5433}:5432"
+    volumes:
+      - integration-db-data:/var/lib/postgresql/data
+
+  rabbitmq:
+    image: rabbitmq:4.3.6-management
+    restart: unless-stopped
+    networks: [si]
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-opentraining}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?définir RABBITMQ_PASSWORD dans .env}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
+  migrate:
+    <<: *hub
+    build: .
+    pull_policy: build
+    restart: "no"
+    command: ["python", "-m", "shared.migrate"]
+    environment:
+      <<: *hub-env
+      SERVICE_NAME: migrate
+    depends_on:
+      integration-db:
+        condition: service_healthy
+
+  integration-api:
+    <<: *hub
+    restart: unless-stopped
+    working_dir: /app/integration-api
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    environment:
+      <<: *hub-env
+      SERVICE_NAME: integration-api
+      DB_POOL_MAX: "10"
+      ERPNEXT_URL: http://erpnext-frontend:8080
+      ERPNEXT_COMPANY_NAME: ${ERPNEXT_COMPANY_NAME:-OpenTraining}
+      MOODLE_URL: http://moodle
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+  outbox-dispatcher:
+    <<: *hub
+    restart: unless-stopped
+    command: ["python", "-m", "workers.outbox.main"]
+    stop_grace_period: 15s
+    environment:
+      <<: *hub-env
+      SERVICE_NAME: outbox-dispatcher
+      DB_POOL_MAX: "2"
+      OUTBOX_BATCH_SIZE: "50"
+      OUTBOX_POLL_INTERVAL_SECONDS: "0.5"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  registration-worker:
+    <<: *hub
+    restart: unless-stopped
+    command: ["python", "-m", "workers.registration.main"]
+    stop_grace_period: 20s
+    environment:
+      <<: *hub-env
+      SERVICE_NAME: registration-worker
+      DB_POOL_MAX: "4"
+      ERPNEXT_URL: http://erpnext-frontend:8080
+      ERPNEXT_COMPANY_NAME: ${ERPNEXT_COMPANY_NAME:-OpenTraining}
+      MOODLE_URL: http://moodle
+      # Injection de pannes pour les tests (désactivées par défaut).
+      CRASH_AFTER_MOODLE: ${CRASH_AFTER_MOODLE:-false}
+      ERP_STEP_DELAY_SECONDS: ${ERP_STEP_DELAY_SECONDS:-0}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      erpnext-bootstrap:
+        condition: service_completed_successfully
+      moodle-bootstrap:
+        condition: service_completed_successfully
+
+  notification-worker:
+    <<: *hub
+    restart: unless-stopped
+    command: ["python", "-m", "workers.notifications.main"]
+    stop_grace_period: 15s
+    environment:
+      <<: *hub-env
+      SERVICE_NAME: notification-worker
+      DB_POOL_MAX: "2"
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      MAIL_FROM: inscriptions@opentraining.local
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+
+  audit-worker:
+    <<: *hub
+    restart: unless-stopped
+    command: ["python", "-m", "workers.audit.main"]
+    stop_grace_period: 15s
+    environment:
+      <<: *hub-env
+      SERVICE_NAME: audit-worker
+      DB_POOL_MAX: "2"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  mailpit:
+    image: axllent/mailpit:v1.31.4
+    restart: unless-stopped
+    networks: [si]
+    ports:
+      - "${MAILPIT_UI_PORT:-8025}:8025"
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"
+
+networks:
+  si:
+    driver: bridge
+
+volumes:
+  erpnext-db-data:
+  erpnext-redis-queue-data:
+  erpnext-sites:
+  erpnext-logs:
+  moodle-db-data:
+  moodle-data:
+  integration-db-data:
+  rabbitmq-data:
+  integration-secrets:
